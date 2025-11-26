@@ -220,6 +220,24 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/min"] = tool_call_counts.min()
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
+    
+    if "chrf_score" in batch.non_tensor_batch:
+        chrf_scores = batch.non_tensor_batch["chrf_score"]
+        metrics["critic/chrf_score/min"] = chrf_scores.min()
+        metrics["critic/chrf_score/max"] = chrf_scores.max()
+        metrics["critic/chrf_score/mean"] = chrf_scores.mean()
+    
+    if "translation_reward" in batch.non_tensor_batch:
+        translation_rewards = batch.non_tensor_batch["translation_reward"]
+        metrics["critic/translation_reward/min"] = translation_rewards.min()
+        metrics["critic/translation_reward/max"] = translation_rewards.max()
+        metrics["critic/translation_reward/mean"] = translation_rewards.mean()
+
+    if "math_reward" in batch.non_tensor_batch:
+        math_rewards = batch.non_tensor_batch["math_reward"]
+        metrics["critic/math_reward/min"] = math_rewards.min()
+        metrics["critic/math_reward/max"] = math_rewards.max()
+        metrics["critic/math_reward/mean"] = math_rewards.mean()
 
     return metrics
 
