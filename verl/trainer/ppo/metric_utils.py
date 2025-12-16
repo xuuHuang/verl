@@ -226,7 +226,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["critic/chrf_score/min"] = chrf_scores.min()
         metrics["critic/chrf_score/max"] = chrf_scores.max()
         metrics["critic/chrf_score/mean"] = chrf_scores.mean()
-    
+
+    if "comet_score" in batch.non_tensor_batch:
+        comet_scores = batch.non_tensor_batch["comet_score"]
+        metrics["critic/comet_score/min"] = comet_scores.min()
+        metrics["critic/comet_score/max"] = comet_scores.max()
+        metrics["critic/comet_score/mean"] = comet_scores.mean()
+
     if "translation_reward" in batch.non_tensor_batch:
         translation_rewards = batch.non_tensor_batch["translation_reward"]
         metrics["critic/translation_reward/min"] = translation_rewards.min()

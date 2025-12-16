@@ -22,6 +22,7 @@ import os
 import warnings
 from dataclasses import asdict
 from typing import Any, Optional
+import re
 
 import numpy as np
 import psutil
@@ -1924,6 +1925,149 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         output = output.to("cpu")
         return output
+
+class CometWorker(Worker, DistProfilerExtension):
+
+    def __init__(self, config):
+        Worker.__init__(self)
+
+        omega_profiler_config = config.get("profiler", {})
+        profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
+        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
+            tool_config = omega_conf_to_dataclass(
+                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
+            )
+        else:
+            tool_config = None
+        DistProfilerExtension.__init__(
+            self,
+            DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config),
+        )
+
+        import torch.distributed
+
+        self.config = config
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(
+                backend=get_nccl_backend(),
+                timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
+                init_method=os.environ.get("DIST_INIT_METHOD", None),
+            )
+
+        # build device mesh for Ulysses Sequence Parallel
+        world_size = torch.distributed.get_world_size()
+        from torch.distributed.device_mesh import init_device_mesh
+
+        self.ulysses_device_mesh = None
+        self.ulysses_sequence_parallel_size = self.config.get('ulysses_sequence_parallel_size', 1)
+        dp = world_size // self.ulysses_sequence_parallel_size
+        if self.ulysses_sequence_parallel_size > 1:
+            self.ulysses_device_mesh = init_device_mesh(
+                device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=['dp', 'sp']
+            )
+
+        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
+
+        # create training dispatch
+        if self.ulysses_device_mesh is not None:
+            is_collect = self.ulysses_device_mesh["sp"].get_local_rank() == 0
+            self._register_dispatch_collect_info(
+                "comet", dp_rank=self.ulysses_device_mesh["dp"].get_local_rank(), is_collect=is_collect
+            )
+        else:
+            self._register_dispatch_collect_info("comet", dp_rank=self.rank, is_collect=True)
+
+        # set FSDP offload params
+        # self._is_offload_param = self.config.model.fsdp_config.param_offload
+
+        # normalize config
+        # self.config.ppo_mini_batch_size //= (torch.distributed.get_world_size() // self.ulysses_sequence_parallel_size)
+        # self.config.ppo_micro_batch_size //= (torch.distributed.get_world_size() // self.ulysses_sequence_parallel_size)
+        # self.config.forward_micro_batch_size //= (torch.distributed.get_world_size() //
+        #                                           self.ulysses_sequence_parallel_size)
+
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        # This is used to import external_lib into the huggingface systems
+        from verl.workers.comet import DataParallelComet
+        from comet import load_from_checkpoint
+
+        tokenizer_path = self.config.tokenizer_path
+        self.tokenizer = hf_tokenizer(tokenizer_path, trust_remote_code=self.config.get("trust_remote_code", False))
+
+        self.translation_pattern = re.compile(r"<english_translation>(.*?)</english_translation>", re.DOTALL)
+
+        # 检查ckpt_path是否以'.ckpt'结尾
+        if not self.config.ckpt_path.endswith('.ckpt'):
+            self.comet_module = load_from_checkpoint(self.config.ckpt_path + '/model.ckpt', local_files_only=True, reload_hparams=True)
+        else:
+            self.comet_module = load_from_checkpoint(self.config.ckpt_path, local_files_only=True, reload_hparams=True)
+        self.comet = DataParallelComet(config=self.config, comet_module=self.comet_module)
+
+        torch.cuda.empty_cache()
+
+    def _prepare_inputs(self, data: DataProto):
+        extra_info = data.non_tensor_batch["extra_info"]
+
+        triplet_list = []
+        for i in range(data.batch.batch_size[0]):
+            response_ids = data.batch["responses"][i]
+            response_length = response_ids.shape[-1]
+            valid_response_length = data.batch["attention_mask"][i][-response_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+
+            # decode
+            response = self.tokenizer.decode(valid_response_ids)
+            # remove bos and eos
+            response = response.replace(self.tokenizer.eos_token, "")
+            m = self.translation_pattern.search(response)
+            if m is not None:
+                translation = m.group(1).strip()
+            else:
+                translation = ""
+
+            item = {"src": extra_info[i]["src_problem"], "ref": extra_info[i]["en_problem"], "mt": translation}
+            triplet_list.append(item)
+        return triplet_list
+
+    # @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="comet"))
+    @DistProfiler.annotate(color="orange")
+    def compute_comet_score(self, data: DataProto):
+
+        data = data.to(get_device_id())
+        micro_batch_size_per_gpu = self.config.forward_micro_batch_size_per_gpu
+        comet_inputs = self._prepare_inputs(data)
+
+        # perform forward computation
+        # with self.ulysses_sharding_manager:
+            # data = self.ulysses_sharding_manager.preprocess_data(data=data)
+        comet_scores = self.comet.compute_comet_score(comet_inputs, micro_batch_size_per_gpu)
+        output = DataProto.from_dict(tensors={"comet_score": comet_scores})
+            # output = self.ulysses_sharding_manager.postprocess_data(data=output)
+        # output = output.to('cpu')
+
+        torch.cuda.empty_cache()
+        return output
+
+    # @register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.RANK_ZERO)
+    # def compute_valid_comet(self, data: DataProto):
+
+    #     data = data.to(get_device_id())
+    #     micro_batch_size_per_gpu = self.config.forward_micro_batch_size_per_gpu
+    #     data.meta_info['micro_batch_size'] = micro_batch_size_per_gpu
+    #     data.meta_info['use_dynamic_bsz'] = self.config.use_dynamic_bsz
+    #     # perform forward computation
+    #     with self.ulysses_sharding_manager:
+    #         data = self.ulysses_sharding_manager.preprocess_data(data=data)
+    #         comet_scores = self.comet.compute_valid_comet(data=data)
+    #         output = DataProto.from_dict(tensors={'valid_comet_metric': comet_scores})
+    #         output = self.ulysses_sharding_manager.postprocess_data(data=output)
+    #     output = output.to('cpu')
+
+    #     torch.cuda.empty_cache()
+    #     return output
 
 
 # ================================= Async related workers =================================

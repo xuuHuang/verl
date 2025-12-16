@@ -30,6 +30,8 @@ defaults:
   # Reward model config.
   - reward_model@reward_model: dp_reward_model
 
+  - comet_model@comet_model: dp_comet_model
+
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
 

@@ -257,6 +257,16 @@ class TaskRunner:
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
             self.mapping[Role.RefPolicy] = "global_pool"
 
+    def add_comet_model_worker(self, config):
+        """Add comet model worker if enabled."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        if config.comet_model.enable and config.reward_model.tapo_config.reward_type in {"mixed", "comet"}:
+            from verl.workers.fsdp_workers import CometWorker
+            self.role_worker_mapping[Role.CometModel] = ray.remote(CometWorker)
+            self.mapping[Role.CometModel] = "global_pool"
+
+
     def run(self, config):
         """Execute the main PPO training workflow.
 
@@ -291,6 +301,8 @@ class TaskRunner:
 
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
+
+        self.add_comet_model_worker(config)
 
         # validate config
         validate_config(

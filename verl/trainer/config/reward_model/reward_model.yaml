@@ -59,6 +59,11 @@ reward_manager: naive
 # custom reward function executed async on CPU, during log_prob
 launch_reward_fn_async: False
 
+tapo_config:
+  reward_type: mixed
+  aggregate_method: add
+  lambd: 0.2
+
 # Cloud/local sandbox fusion configuration for custom reward logic
 sandbox_fusion:
 

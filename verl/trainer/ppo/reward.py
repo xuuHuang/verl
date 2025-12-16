@@ -167,6 +167,8 @@ def load_reward_manager(
     # Instantiate and return the reward manager with the specified parameters
     # RewardLoopManagerBase subclasses (like RateLimitedRewardLoopManager) don't accept num_examine
     # while AbstractRewardManager subclasses (like NaiveRewardManager) do
+    if config.reward_model.reward_manager == "tapo":
+        reward_kwargs.update({"tapo_config": config.reward_model.tapo_config})
     if RewardLoopManagerBase is not None and issubclass(reward_manager_cls, RewardLoopManagerBase):
         # RewardLoopManagerBase-based managers use a different signature
         return reward_manager_cls(

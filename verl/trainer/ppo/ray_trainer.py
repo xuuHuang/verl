@@ -50,7 +50,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model, need_comet_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -325,6 +325,7 @@ class RayPPOTrainer:
         self.use_reference_policy = need_reference_policy(self.role_worker_mapping)
         self.use_rm = need_reward_model(self.role_worker_mapping)
         self.use_critic = need_critic(self.config)
+        self.use_comet = need_comet_model(self.role_worker_mapping)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
@@ -710,6 +711,15 @@ class RayPPOTrainer:
             )
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
+        # create comet model if needed
+        if self.use_comet:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.CometModel)
+            comet_model_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.CometModel],
+                config=self.config.comet_model,
+            )
+            self.resource_pool_to_cls[resource_pool][str(Role.CometModel)] = comet_model_cls
+
         # create a reward model if reward_fn is None
         if self.use_rm:
             # we create a RM here
@@ -767,6 +777,10 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg[str(Role.RewardModel)]
             self.rm_wg.init_model()
+
+        if self.use_comet:
+            self.comet_model_wg = all_wg[str(Role.CometModel)]
+            self.comet_model_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg[str(actor_role)]
@@ -1095,6 +1109,11 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+
+                    if self.use_comet:
+                        with marked_timer("comet", timing_raw, color="magenta"):
+                            comet_scores = self.comet_model_wg.compute_comet_score(batch)
+                            batch = batch.union(comet_scores)
 
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score

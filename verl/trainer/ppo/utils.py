@@ -36,6 +36,7 @@ class Role(Enum):
     RewardModel = 5
     ActorRolloutRef = 6
     Env = 7
+    CometModel = 8
 
     def __str__(self):
         return self._get_role_string()
@@ -49,6 +50,7 @@ class Role(Enum):
             Role.RefPolicy: "ref",
             Role.RewardModel: "rm",
             Role.ActorRolloutRef: "actor_rollout_ref",
+            Role.CometModel: "comet_model",
         }
         return role_mapping.get(self, self.name.lower())
 
@@ -62,6 +64,7 @@ class Role(Enum):
             "ref": cls.RefPolicy,
             "rm": cls.RewardModel,
             "actor_rollout_ref": cls.ActorRolloutRef,
+            "comet_model": cls.CometModel,
         }
         role = string_mapping.get(name.lower())
         if role is None:
@@ -95,3 +98,7 @@ def need_critic(config: DictConfig) -> bool:
             stacklevel=2,
         )
         return False
+
+def need_comet_model(role_worker_mapping: dict[Role, WorkerType]) -> bool:
+    """Given a role worker mapping, do we need comet model."""
+    return Role.CometModel in role_worker_mapping
