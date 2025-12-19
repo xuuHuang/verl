@@ -22,19 +22,21 @@ def compute_score(
     chrf_score = 0.0
     math_reward = 0.0
     translation_reward = 0.0
+    translation_char_length = 0
 
     m = re.search(r"<english_translation>(.*?)</english_translation>", solution_str, re.DOTALL)
     if m is not None:
+        translation_char_length = m.end()
         reference = extra_info.get("en_problem", None)   
         if reference is not None:
             chrf = CHRF(word_order=2)
             translation = m.group(1).strip()
-            chrf_score = chrf.sentence_score(translation, [reference]).score / 100.0
+            chrf_score = round(chrf.sentence_score(translation, [reference]).score / 100.0, 4)
         math_reward = math_verify.compute_score(solution_str, ground_truth)
 
         match reward_type:
             case "mixed":
-                translation_reward = chrf_score + comet_score
+                translation_reward = max(round((chrf_score + comet_score) / 2, 4), 0.0)
             case "comet":
                 translation_reward = comet_score
             case "chrf++":
@@ -45,6 +47,10 @@ def compute_score(
         match aggregate_method:
             case "add":
                 res = translation_reward + math_reward
+            case "multiplicative":
+                res = translation_reward * math_reward
+            case "seperate":
+                res = 0.0
             case _:
                 raise NotImplementedError(f"Unsupported aggregate_method: {aggregate_method}")
 
@@ -64,5 +70,6 @@ def compute_score(
         "score": float(res),
         "math_reward": math_reward,
         "translation_reward": translation_reward,
+        "translation_char_length": translation_char_length,
         **mt_score,
     }
