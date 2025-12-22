@@ -239,6 +239,17 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.TAPO:
+        tapo_calculation_mask = data.batch["response_mask"]
+        advantages, returns = core_algos.compute_tapo_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=tapo_calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            translation_token_length=data.non_tensor_batch["translation_token_length"],
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)

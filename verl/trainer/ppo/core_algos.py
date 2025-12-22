@@ -105,6 +105,7 @@ class AdvantageEstimator(str, Enum):
     GPG = "gpg"
     RLOO_VECTORIZED = "rloo_vectorized"
     GRPO_VECTORIZED = "grpo_vectorized"
+    TAPO = "tapo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -749,6 +750,56 @@ def compute_rloo_vectorized_outcome_advantage(
         adv = ((c * scores - torch.bincount(inv, weights=scores)[inv]) / (c - 1).clamp_min(1)) * (c > 1)
 
         adv = adv.unsqueeze(-1) * response_mask
+
+    return adv, adv
+
+@register_adv_est(AdvantageEstimator.TAPO)
+def compute_tapo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    translation_token_length: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+
+    # scores = token_level_rewards.sum(dim=-1)
+    scores = token_level_rewards[:, [0, -1]]
+
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor([0.0, 0.0])
+                id2std[idx] = torch.tensor([1.0, 1.0])
+            elif len(id2score[idx]) > 1:
+                scores_tensor = torch.stack(id2score[idx])
+                id2mean[idx] = torch.mean(scores_tensor, dim=0)
+                id2std[idx] = torch.std(scores_tensor, dim=0)
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        for i in range(bsz):
+            if norm_adv_by_std_in_grpo:
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            else:
+                scores[i] = scores[i] - id2mean[index[i]]
+        # scores = scores.unsqueeze(-1) * response_mask
+        seq_len = response_mask.shape[1]
+        col_idx = torch.arange(seq_len).unsqueeze(0).expand(bsz, -1)
+        translation_length = torch.tensor(translation_token_length).unsqueeze(1)
+        adv = torch.where(
+            col_idx < translation_length,
+            scores[:, 0].unsqueeze(1).expand(-1, seq_len),
+            scores[:, 1].unsqueeze(1).expand(-1, seq_len)
+        )
+        adv = adv * response_mask
 
     return adv, adv
 

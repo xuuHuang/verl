@@ -49,7 +49,7 @@ def compute_score(
                 res = translation_reward + math_reward
             case "multiplicative":
                 res = translation_reward * math_reward
-            case "seperate":
+            case "separate":
                 res = 0.0
             case _:
                 raise NotImplementedError(f"Unsupported aggregate_method: {aggregate_method}")

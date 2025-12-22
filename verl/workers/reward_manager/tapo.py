@@ -108,15 +108,27 @@ class TapoRewardManager(AbstractRewardManager):
                 tapo_config=self.tapo_config,
             )
 
-            if isinstance(score, dict):
-                reward = score["score"]
-                # Store the information including original reward
-                for key, value in score.items():
-                    reward_extra_info[key].append(value)
+            if self.tapo_config["aggregate_method"] == "separate":
+                translation_char_length = score.pop("translation_char_length")
+                _ = score.pop("score")
+                translation_token_length = 0
+                if translation_char_length > 0:
+                    translation_tokens = self.tokenizer.encode(response_str[:translation_char_length], add_special_tokens=False)
+                    translation_token_length = len(translation_tokens)
+                if translation_token_length < valid_response_length:
+                    reward_tensor[i, :translation_token_length] = score["translation_reward"]
+                    reward_tensor[i, translation_token_length:] = score["math_reward"]
+                else:
+                    pass
+                # data_item.non_tensor_batch["translation_token_length"] = translation_token_length
+                score["translation_token_length"] = translation_token_length
             else:
-                reward = score
+                reward = score["score"]
+                reward_tensor[i, valid_response_length - 1] = reward
 
-            reward_tensor[i, valid_response_length - 1] = reward
+            # Store the information including original reward
+            for key, value in score.items():
+                reward_extra_info[key].append(value)
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
