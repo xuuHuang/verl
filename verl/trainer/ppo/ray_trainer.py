@@ -185,6 +185,7 @@ def compute_advantage(
     lam: float = 1.0,
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
+    alpha: float = 1.0,
     config: Optional[AlgoConfig] = None,
 ) -> DataProto:
     """Compute advantage estimates for policy optimization.
@@ -247,6 +248,7 @@ def compute_advantage(
             index=data.non_tensor_batch["uid"],
             translation_token_length=data.non_tensor_batch["translation_token_length"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            alpha=alpha,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1235,6 +1237,7 @@ class RayPPOTrainer:
                             lam=self.config.algorithm.lam,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                            alpha=self.config.reward_model.tapo_config.alpha,
                             config=self.config.algorithm,
                         )
 

@@ -62,7 +62,8 @@ launch_reward_fn_async: False
 tapo_config:
   reward_type: mixed
   aggregate_method: add
-  lambd: 0.2
+  lambd: 1.0
+  alpha: 1.0
 
 # Cloud/local sandbox fusion configuration for custom reward logic
 sandbox_fusion:
