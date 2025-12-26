@@ -791,7 +791,7 @@ def compute_tapo_outcome_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
-            scores[i, 0] = scores[i, 0] * alpha + scores[i, 1] * (1 - alpha)
+        scores[:, 0] = scores[:, 0] * alpha + scores[:, 1] * (1 - alpha)
         # scores = scores.unsqueeze(-1) * response_mask
         seq_len = response_mask.shape[1]
         col_idx = torch.arange(seq_len).unsqueeze(0).expand(bsz, -1)

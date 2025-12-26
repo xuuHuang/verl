@@ -261,7 +261,7 @@ class TaskRunner:
         """Add comet model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if config.comet_model.enable and config.reward_model.tapo_config.reward_type in {"mixed", "comet"}:
+        if config.comet_model.enable and config.reward_model.tapo_config.reward_type in {"mixed", "comet", "adaptive"}:
             from verl.workers.fsdp_workers import CometWorker
             self.role_worker_mapping[Role.CometModel] = ray.remote(CometWorker)
             self.mapping[Role.CometModel] = "global_pool"

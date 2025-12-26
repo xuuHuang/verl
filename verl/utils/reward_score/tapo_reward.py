@@ -2,6 +2,8 @@ import re
 from sacrebleu.metrics import CHRF
 from verl.utils.reward_score import math_verify
 
+LOW_RESOURCE_LANGS = {"sw", "te"}
+
 def compute_score(
     data_source,
     solution_str,
@@ -41,6 +43,12 @@ def compute_score(
                 translation_reward = comet_score
             case "chrf++":
                 translation_reward = chrf_score
+            case "adaptive":
+                lang = extra_info.get("lang", None)
+                if lang in LOW_RESOURCE_LANGS or lang is None:
+                    translation_reward = chrf_score
+                else:
+                    translation_reward = comet_score
 
         translation_reward *= lambd
 
@@ -59,7 +67,7 @@ def compute_score(
         mt_score = {"chrf_score": chrf_score}
     else:
         match reward_type:
-            case "mixed":
+            case "mixed" | "adaptive":
                 mt_score = {"chrf_score": chrf_score, "comet_score": comet_score}
             case "comet":
                 mt_score = {"comet_score": comet_score}
