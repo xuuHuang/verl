@@ -2027,7 +2027,13 @@ class CometWorker(Worker, DistProfilerExtension):
             else:
                 translation = ""
 
-            item = {"src": extra_info[i]["src_problem"], "ref": extra_info[i]["en_problem"], "mt": translation}
+            match self.config.mode:
+                case "srt":
+                    item = {"src": extra_info[i]["src_problem"], "ref": extra_info[i]["en_problem"], "mt": translation}
+                case "rt":
+                    item = {"ref": extra_info[i]["en_problem"], "mt": translation}
+                case "st":
+                    item = {"src": extra_info[i]["src_problem"], "mt": translation}
             triplet_list.append(item)
         return triplet_list
 
