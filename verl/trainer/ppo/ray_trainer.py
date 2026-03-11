@@ -252,6 +252,14 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.RAFT:
+        raft_calculation_mask = data.batch["response_mask"]
+        advantages, returns = core_algos.compute_raft_logp(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=raft_calculation_mask,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
