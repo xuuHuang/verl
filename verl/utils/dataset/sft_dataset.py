@@ -18,6 +18,7 @@ SFT dataset
 Each parquet file contains
 """
 
+import traceback
 import numpy as np
 import pandas as pd
 import torch
@@ -48,6 +49,7 @@ class SFTDataset(Dataset):
         use_shm = config.get("use_shm", False)
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
+        self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
 
         assert truncation in ["error", "left", "right"]
@@ -105,6 +107,7 @@ class SFTDataset(Dataset):
                 indices = np.arange(self.max_samples)
             self.dataframe = self.dataframe.iloc[indices.tolist()]
             print(f"selected {self.max_samples} random samples out of {total}")
+        self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
 
         self.prompts = self.dataframe[self.prompt_key]
         for key in self.prompt_dict_keys:
@@ -129,6 +132,33 @@ class SFTDataset(Dataset):
         if isinstance(self.responses, pd.DataFrame):
             self.responses = self.responses.squeeze()
         self.responses = self.responses.tolist()
+
+    def maybe_filter_out_long_prompts(self, dataframe=None):
+        # filter out too long prompts
+        if self.filter_overlong_prompts:
+            tokenizer = self.tokenizer
+            prompt_key = self.prompt_key
+            response_key = self.response_key
+
+            def doc2len(doc) -> int:
+                try:
+                    apply_kwargs = dict(**self.apply_chat_template_kwargs)
+                    prompt = doc.get(prompt_key[0])
+                    response = doc.get(response_key[0])
+                    prompt_chat = [{"role": "user", "content": prompt}, {"role": "assistant", "content": response}]
+
+                    return len(
+                        tokenizer.apply_chat_template(prompt_chat, **apply_kwargs)
+                    )
+                except Exception:
+                    print("Error processing one of the samples, skipping...")
+                    traceback.print_exc()
+                    return self.max_length + 1
+
+            dataframe = dataframe[dataframe.apply(lambda x: doc2len(x) <= self.max_length, axis=1)]
+
+            print(f"filter dataset len: {len(dataframe)}")
+        return dataframe
 
     def __len__(self):
         return len(self.prompts)

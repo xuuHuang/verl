@@ -10,6 +10,7 @@ data:
   val_files: ~/data/gsm8k/test.parquet
   train_max_samples: -1  # set to -1 to use full dataset
   val_max_samples: -1  # set to -1 to use full dataset
+  filter_overlong_prompts: False
   # Single-turn settings
   prompt_key: question
   response_key: answer
