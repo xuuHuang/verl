@@ -63,7 +63,13 @@ tapo_config:
   reward_type: mixed
   aggregate_method: add
   lambd: 1.0
-  alpha: 1.0
+
+  # Optional scheduler for alpha. When absent or type=constant, alpha stays fixed.
+  # Supported types: constant, cosine, linear, exponential.
+  alpha_scheduler:
+    type: constant
+    alpha_max: 1.0
+    alpha_min: 0.0
 
 # Cloud/local sandbox fusion configuration for custom reward logic
 sandbox_fusion:

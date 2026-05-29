@@ -1032,6 +1032,14 @@ class RayPPOTrainer:
             rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
             rollout_skip.wrap_generate_sequences()
 
+        # build alpha scheduler for TAPO (optional, no-op if not configured)
+        from verl.trainer.ppo.alpha_scheduler import get_alpha_scheduler
+
+        self._alpha_scheduler = get_alpha_scheduler(
+            self.config.reward_model.tapo_config,
+            total_steps=self.total_training_steps,
+        )
+
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
@@ -1238,6 +1246,8 @@ class RayPPOTrainer:
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
 
+                        alpha = self._alpha_scheduler.get_alpha(self.global_steps)
+                        metrics["actor/alpha"] = alpha
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
@@ -1245,7 +1255,7 @@ class RayPPOTrainer:
                             lam=self.config.algorithm.lam,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            alpha=self.config.reward_model.tapo_config.alpha,
+                            alpha=alpha,
                             config=self.config.algorithm,
                         )
 
