@@ -1056,6 +1056,11 @@ class RayPPOTrainer:
         )
         next_step_profile = False
 
+        # Dynamic sampling (filter groups) accumulators across generation batches
+        batch = None
+        num_prompt_in_batch = 0
+        num_gen_batches = 0
+
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1067,21 +1072,25 @@ class RayPPOTrainer:
                         if self.config.global_profiler.profile_continuous_steps
                         else curr_step_profile
                     )
-                batch: DataProto = DataProto.from_single_dict(batch_dict)
-                batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+                new_batch: DataProto = DataProto.from_single_dict(batch_dict)
+                new_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 
                 # add uid to batch
-                batch.non_tensor_batch["uid"] = np.array(
-                    [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                new_batch.non_tensor_batch["uid"] = np.array(
+                    [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
                 )
 
-                gen_batch = self._get_gen_batch(batch)
+                num_gen_batches += 1
+                gen_batch = self._get_gen_batch(new_batch)
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )
+
+                filter_groups_config = self.config.algorithm.get("filter_groups", None)
+                filter_enabled = filter_groups_config is not None and filter_groups_config.enable
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
@@ -1106,56 +1115,159 @@ class RayPPOTrainer:
                                 gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
                             else:
                                 gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                            batch = batch.union(gen_baseline_output)
+                            new_batch = new_batch.union(gen_baseline_output)
                             # compute reward model score on batch
                             rm_scores = None
-                            if self.use_rm and "rm_scores" not in batch.batch.keys():
-                                rm_scores = self.rm_wg.compute_rm_score(batch)
-                                batch = batch.union(rm_scores)
-                            reward_baseline_tensor, _ = compute_reward(batch, self.reward_fn)
+                            if self.use_rm and "rm_scores" not in new_batch.batch.keys():
+                                rm_scores = self.rm_wg.compute_rm_score(new_batch)
+                                new_batch = new_batch.union(rm_scores)
+                            reward_baseline_tensor, _ = compute_reward(new_batch, self.reward_fn)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             keys_to_pop = set(gen_baseline_output.batch.keys())
                             if rm_scores is not None:
                                 keys_to_pop.update(rm_scores.batch.keys())
-                            batch.pop(batch_keys=list(keys_to_pop))
+                            new_batch.pop(batch_keys=list(keys_to_pop))
 
-                            batch.batch["reward_baselines"] = reward_baseline_tensor
+                            new_batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
                     # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
+                    new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    new_batch = new_batch.union(gen_batch_output)
 
-                    if "response_mask" not in batch.batch.keys():
-                        batch.batch["response_mask"] = compute_response_mask(batch)
-                    # Balance the number of valid tokens across DP ranks.
-                    # NOTE: This usually changes the order of data in the `batch`,
-                    # which won't affect the advantage calculation (since it's based on uid),
-                    # but might affect the loss calculation (due to the change of mini-batching).
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
+                    if "response_mask" not in new_batch.batch.keys():
+                        new_batch.batch["response_mask"] = compute_response_mask(new_batch)
 
-                    # compute global_valid tokens
-                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+                    if not filter_enabled:
+                        batch = new_batch
 
-                    if self.use_comet:
-                        with marked_timer("comet", timing_raw, color="magenta"):
-                            comet_scores = self.comet_model_wg.compute_comet_score(batch)
-                            batch = batch.union(comet_scores)
+                        # Balance the number of valid tokens across DP ranks.
+                        # NOTE: This usually changes the order of data in the `batch`,
+                        # which won't affect the advantage calculation (since it's based on uid),
+                        # but might affect the loss calculation (due to the change of mini-batching).
+                        if self.config.trainer.balance_batch:
+                            self._balance_batch(batch, metrics=metrics)
 
-                    with marked_timer("reward", timing_raw, color="yellow"):
-                        # compute reward model score
-                        if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
+                        # compute global_valid tokens
+                        batch.meta_info["global_token_num"] = torch.sum(
+                            batch.batch["attention_mask"], dim=-1
+                        ).tolist()
 
-                        if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(
-                                data=batch, config=self.config, tokenizer=self.tokenizer
+                        if self.use_comet:
+                            with marked_timer("comet", timing_raw, color="magenta"):
+                                comet_scores = self.comet_model_wg.compute_comet_score(batch)
+                                batch = batch.union(comet_scores)
+
+                        with marked_timer("reward", timing_raw, color="yellow"):
+                            # compute reward model score
+                            if self.use_rm and "rm_scores" not in batch.batch.keys():
+                                reward_tensor = self.rm_wg.compute_rm_score(batch)
+                                batch = batch.union(reward_tensor)
+
+                            if self.config.reward_model.launch_reward_fn_async:
+                                future_reward = compute_reward_async.remote(
+                                    data=batch, config=self.config, tokenizer=self.tokenizer
+                                )
+                            else:
+                                reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                    else:
+                        # === Dynamic sampling (filter groups) ===
+                        # Reward must be available before filtering, so compute it synchronously
+                        # here (bypassing launch_reward_fn_async) on the freshly generated batch.
+                        if self.use_comet:
+                            with marked_timer("comet", timing_raw, color="magenta"):
+                                comet_scores = self.comet_model_wg.compute_comet_score(new_batch)
+                                new_batch = new_batch.union(comet_scores)
+
+                        with marked_timer("reward", timing_raw, color="yellow"):
+                            if self.use_rm and "rm_scores" not in new_batch.batch.keys():
+                                reward_tensor = self.rm_wg.compute_rm_score(new_batch)
+                                new_batch = new_batch.union(reward_tensor)
+                            reward_tensor, reward_extra_infos_dict = compute_reward(new_batch, self.reward_fn)
+
+                        new_batch.batch["token_level_scores"] = reward_tensor
+                        if reward_extra_infos_dict:
+                            new_batch.non_tensor_batch.update(
+                                {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
                             )
+
+                        if self.config.algorithm.use_kl_in_reward:
+                            new_batch, kl_metrics = apply_kl_penalty(
+                                new_batch,
+                                kl_ctrl=self.kl_ctrl_in_reward,
+                                kl_penalty=self.config.algorithm.kl_penalty,
+                            )
+                            metrics.update(kl_metrics)
                         else:
-                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                            new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
+
+                        # NOTE: When prompts after filtering is less than train batch size,
+                        # we skip to the next generation batch
+                        metric_name = filter_groups_config.metric
+                        if metric_name == "seq_final_reward":
+                            new_batch.non_tensor_batch["seq_final_reward"] = (
+                                new_batch.batch["token_level_rewards"].sum(dim=-1).numpy()
+                            )
+                        elif metric_name == "seq_reward":
+                            new_batch.non_tensor_batch["seq_reward"] = (
+                                new_batch.batch["token_level_scores"].sum(dim=-1).numpy()
+                            )
+
+                        # Collect the sequence reward for each trajectory
+                        prompt_uid2metric_vals = defaultdict(list)
+                        for uid, metric_val in zip(
+                            new_batch.non_tensor_batch["uid"],
+                            new_batch.non_tensor_batch[metric_name],
+                            strict=True,
+                        ):
+                            prompt_uid2metric_vals[uid].append(metric_val)
+
+                        prompt_uid2metric_std = {}
+                        for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
+                            prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+
+                        kept_prompt_uids = [
+                            uid
+                            for uid, std in prompt_uid2metric_std.items()
+                            if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
+                        ]
+                        num_prompt_in_batch += len(kept_prompt_uids)
+
+                        kept_traj_idxs = []
+                        for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
+                            if traj_from_prompt_uid in kept_prompt_uids:
+                                kept_traj_idxs.append(idx)
+
+                        new_batch = new_batch[kept_traj_idxs]
+                        batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
+
+                        prompt_bsz = self.config.data.train_batch_size
+                        if num_prompt_in_batch < prompt_bsz:
+                            print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
+                            max_num_gen_batches = filter_groups_config.max_num_gen_batches
+                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                print(f"{num_gen_batches=}. Keep generating...")
+                                continue
+                            else:
+                                raise ValueError(
+                                    f"{num_gen_batches=} >= {max_num_gen_batches=}."
+                                    + " Generated too many. Please check if your data are too difficult."
+                                    + " You could also try set max_num_gen_batches=0 to enable endless trials."
+                                )
+                        else:
+                            # Align the batch
+                            traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                            batch = batch[:traj_bsz]
+
+                        # Balance the number of valid tokens across DP ranks.
+                        if self.config.trainer.balance_batch:
+                            self._balance_batch(batch, metrics=metrics)
+
+                        # compute global_valid tokens
+                        batch.meta_info["global_token_num"] = torch.sum(
+                            batch.batch["attention_mask"], dim=-1
+                        ).tolist()
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -1208,23 +1320,29 @@ class RayPPOTrainer:
                             batch = batch.union(values)
 
                     with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
-                        if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        batch.batch["token_level_scores"] = reward_tensor
+                        # In the filter-groups path, token-level scores/rewards and KL penalty
+                        # were already finalized per generation batch before filtering.
+                        if not filter_enabled:
+                            # we combine with rule-based rm
+                            reward_extra_infos_dict: dict[str, list]
+                            if self.config.reward_model.launch_reward_fn_async:
+                                reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                            batch.batch["token_level_scores"] = reward_tensor
 
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            if reward_extra_infos_dict:
+                                batch.non_tensor_batch.update(
+                                    {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                                )
 
-                        # compute rewards. apply_kl_penalty if available
-                        if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(
-                                batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
-                            )
-                            metrics.update(kl_metrics)
-                        else:
-                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                            # compute rewards. apply_kl_penalty if available
+                            if self.config.algorithm.use_kl_in_reward:
+                                batch, kl_metrics = apply_kl_penalty(
+                                    batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                                )
+                                metrics.update(kl_metrics)
+                            else:
+                                batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
 
                         # Compute rollout correction: IS weights, rejection sampling, and metrics
                         # Only runs in decoupled mode (computes once per batch using stable π_old)
@@ -1337,6 +1455,7 @@ class RayPPOTrainer:
                     {
                         "training/global_step": self.global_steps,
                         "training/epoch": epoch,
+                        "train/num_gen_batches": num_gen_batches,
                     }
                 )
                 # collect metrics
@@ -1375,3 +1494,22 @@ class RayPPOTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+
+                # reset dynamic sampling accumulators for the next training step
+                batch = None
+                num_prompt_in_batch = 0
+                num_gen_batches = 0
+
+        # With dynamic sampling (filter_groups), a single training step may consume
+        # multiple dataloader batches, so the dataloader can be exhausted before
+        # `is_last_step` triggers. Save a final checkpoint here if it wasn't already.
+        checkpoint_dir = os.path.join(
+            self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
+        )
+        if self.config.trainer.save_freq > 0 and not os.path.exists(checkpoint_dir):
+            timing_raw = defaultdict(float)
+            with marked_timer("save_checkpoint", timing_raw, color="green"):
+                self._save_checkpoint()
+            metrics = {f"timing/{k}": v for k, v in timing_raw.items()}
+            logger.log(data=metrics, step=self.global_steps)
+        progress_bar.close()

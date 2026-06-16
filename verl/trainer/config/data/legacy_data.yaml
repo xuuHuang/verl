@@ -41,6 +41,10 @@ max_response_length: 512
 # Batch size sampled for one training iteration of different RL algorithms.
 train_batch_size: 1024
 
+# Batch size sampled per generation step. With dynamic sampling (filter_groups)
+# this can exceed train_batch_size; defaults to train_batch_size.
+gen_batch_size: ${.train_batch_size}
+
 # Batch size used during validation. Can be null.
 val_batch_size: null
 
