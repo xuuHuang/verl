@@ -104,6 +104,8 @@ class TapoRewardManager(AbstractRewardManager):
                 solution_str=response_str,
                 ground_truth=ground_truth,
                 comet_score=comet_score[i].item(),
+                response_ids=valid_response_ids.tolist(),
+                tokenizer=self.tokenizer,
                 extra_info=extra_info,
                 tapo_config=self.tapo_config,
             )

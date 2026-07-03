@@ -63,6 +63,7 @@ tapo_config:
   reward_type: mixed
   aggregate_method: add
   lambd: 1.0
+  check_repetition: False
 
   # Optional scheduler for alpha. When absent or type=constant, alpha stays fixed.
   # Supported types: constant, cosine, linear, exponential.

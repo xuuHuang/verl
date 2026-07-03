@@ -1,6 +1,7 @@
 import re
 from sacrebleu.metrics import CHRF
 from verl.utils.reward_score import math_verify
+from verl.utils.reward_score.repeat import check_repetition_valid
 
 LOW_RESOURCE_LANGS = {"sw", "te"}
 
@@ -9,6 +10,8 @@ def compute_score(
     solution_str,
     ground_truth,
     comet_score,
+    response_ids=None,
+    tokenizer=None,
     extra_info=None,
     tapo_config=None,
     sandbox_fusion_url=None,
@@ -19,6 +22,7 @@ def compute_score(
     reward_type = tapo_config["reward_type"]
     aggregate_method = tapo_config["aggregate_method"]
     lambd = tapo_config["lambd"]
+    check_repetition = tapo_config.get("check_repetition", False)
 
     res = 0.0
     chrf_score = 0.0
@@ -27,6 +31,7 @@ def compute_score(
     translation_char_length = 0
 
     m = re.search(r"<english_translation>(.*?)</english_translation>", solution_str, re.DOTALL)
+    # if m is not None and (not check_repetition or (check_repetition and check_repetition_valid(solution_str, response_ids, tokenizer))):
     if m is not None:
         translation_char_length = m.end()
         reference = extra_info.get("en_problem", None)   
@@ -35,6 +40,8 @@ def compute_score(
             translation = m.group(1).strip()
             chrf_score = round(chrf.sentence_score(translation, [reference]).score / 100.0, 4)
         math_reward = math_verify.compute_score(solution_str, ground_truth)
+        if check_repetition and not check_repetition_valid(solution_str, response_ids, tokenizer):
+            math_reward = 0.0
 
         match reward_type:
             case "mixed":
