@@ -96,10 +96,13 @@ class TapoRewardManager(AbstractRewardManager):
             return 0.0
 
         try:
-            candidate_scores = [float(token) for token in numeric_tokens]
+            candidate_scores = [float(token) for token in numeric_tokens][::-1]
         except ValueError:
+            print(f"[tapo][llm_judge] parse numeric score error: {candidate_scores}")
             return 0.0
 
+        if len(candidate_scores) > 1:
+            print(f"[tapo][llm_judge] warning: #candidate_scores > 1\n{judge_text=}")
         min_score = float(self.llm_judge_config.get("min_score", 0.0))
         max_score = float(self.llm_judge_config.get("max_score", 100.0))
         for score in candidate_scores:
@@ -145,6 +148,7 @@ class TapoRewardManager(AbstractRewardManager):
                         model=model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=temperature,
+                        max_completion_tokens=128,
                         timeout=request_timeout,
                     )
                 judge_text = response.choices[0].message.content.strip()
@@ -220,6 +224,8 @@ class TapoRewardManager(AbstractRewardManager):
         #     else:
         #         return data.batch["rm_scores"]
 
+        is_validate = data.meta_info.get("validate", False)
+
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
 
@@ -252,15 +258,16 @@ class TapoRewardManager(AbstractRewardManager):
             rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
             extra_info["num_turns"] = num_turns
             extra_info["rollout_reward_scores"] = rollout_reward_scores
+            extra_info["validate"] = is_validate
 
             translation = _extract_english_translation(response_str)
             extra_info["translation"] = translation
             judge_inputs.append(
                 {
-                    "source_problem": extra_info["src_problem"],
-                    "source_language": extra_info["lang"],
+                    "source_problem": extra_info.get("src_problem", None),
+                    "source_language": extra_info.get("lang", None),
                     "candidate_translation": translation,
-                    "reference_translation": extra_info["en_problem"],
+                    "reference_translation": extra_info.get("en_problem", None),
                 }
             )
 
@@ -277,7 +284,7 @@ class TapoRewardManager(AbstractRewardManager):
 
         llm_judge_scores = (
             self._evaluate_translation_batch(judge_inputs)
-            if self._llm_judge_enabled()
+            if self._llm_judge_enabled() and not is_validate
             else [0.0] * len(batch_items)
         )
         assert len(llm_judge_scores) == len(batch_items), "Length of llm_judge_scores must match the number of batch items"

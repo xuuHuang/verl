@@ -32,7 +32,7 @@ def compute_score(
     # if m is not None:
     if (translation := extra_info.get("translation", None)) is not None:
         translation_char_length = len(translation) 
-        if reference := extra_info.get("en_problem", None) is not None:
+        if (reference := extra_info.get("en_problem", None)) is not None:
             chrf = CHRF(word_order=2)
             chrf_score = round(chrf.sentence_score(translation, [reference]).score / 100.0, 4)
         math_reward = math_verify.compute_score(solution_str, ground_truth)
